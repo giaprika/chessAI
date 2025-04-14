@@ -1,183 +1,98 @@
-import os
-import threading
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
-from glob import glob
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from utils import get_loss_from_model_name, get_filename_without_extension, board_to_tensor, fen_to_tensor
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+from self_play import SelfPlay
+from model import AlphaZeroNet
+import chess
 
-
-def get_loss(model, test_loader, criterion) -> float:
-    """Evaluate the model on the test dataset and print the average test loss."""
-    model.eval()  # Set model to evaluation mode
-    total_test_loss = 0
-    with torch.no_grad():  # Disable gradient calculation
-        for inputs, targets in test_loader:
-            outputs = model(inputs)  # Forward pass
-            loss = criterion(outputs, targets.unsqueeze(1))  # Calculate test loss
-            total_test_loss += loss.item()  # Accumulate loss for reporting
-
-    avg_test_loss = total_test_loss / len(test_loader)
-    print(f"Average Test Loss: {avg_test_loss:.4f}")
-    return avg_test_loss
-
-
-class Trainer:
-    def __init__(self, num_epochs: int, learning_rate: float, model_save_path: str = None, batch_size: int = 64,
-                 max_files: int = 1000, model_extension: str = "pth"):
-        self.num_epochs = num_epochs
+class AlphaZeroTrainer:
+    def __init__(self, model, epochs=10, batch_size=64, learning_rate=1e-4):
+        self.model = model
+        self.epochs = epochs
         self.batch_size = batch_size
-        self.lr = learning_rate
-        self.model_save_path = model_save_path
-        self.model_path = os.path.dirname(self.model_save_path)
-        self.max_files = max_files
-        self.model_extension = model_extension
+        self.learning_rate = learning_rate
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        self.loss_fn = nn.MSELoss()
+    
+    def train(self, game_data):
+        # Prepare data for training
+        states, policies, values = zip(*game_data)
+        states = torch.stack(states)
+        policies = torch.tensor(np.array(policies), dtype=torch.float32)
+        values = torch.tensor(np.array(values), dtype=torch.float32)
+        
+        dataset = TensorDataset(states, policies, values)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        
+        for epoch in range(self.epochs):
+            total_loss = 0
+            for batch in dataloader:
+                state_batch, policy_batch, value_batch = batch
+                
+                self.optimizer.zero_grad()
+                
+                # Forward pass
+                policy_pred, value_pred = self.model(state_batch)
+                
+                # Loss calculation
+                policy_loss = self.loss_fn(policy_pred, policy_batch)
+                value_loss = self.loss_fn(value_pred.squeeze(), value_batch)
+                
+                loss = policy_loss + value_loss
+                total_loss += loss.item()
+                
+                # Backward pass
+                loss.backward()
+                self.optimizer.step()
+            
+            print(f"Epoch {epoch+1}/{self.epochs}, Loss: {total_loss / len(dataloader)}")
+    
+    def save_model(self, file_path):
+        torch.save(self.model.state_dict(), file_path)
+    
+    def load_model(self, file_path):
+        self.model.load_state_dict(torch.load(file_path))
 
-        self.stop_training = False  # To stop the loop
+def train():
+    # Khởi tạo mô hình
+    model = AlphaZeroNet()
+    
+    # Khởi tạo Trainer
+    trainer = AlphaZeroTrainer(model, epochs=10, batch_size=64)
+    
+    # Số lượng ván cờ để tạo dữ liệu huấn luyện
+    num_games = 20
+    replay_buffer = []
+    max_buffer_size = 10000
+    
+    for game_num in range(num_games):
+        print(f"Game {game_num+1}/{num_games} started.")
+        # Khởi tạo SelfPlay
+        board = chess.Board()
+        self_play = SelfPlay(model, time_limit=1.0, board=board)
+        
+        game_data, game_result = self_play.play_game()
+        
+        if game_data:
+            # Thêm vào buffer
+            replay_buffer.extend(game_data)
+            if len(replay_buffer) > max_buffer_size:
+                replay_buffer = replay_buffer[-max_buffer_size:]  # Giữ lại phần mới nhất
 
-        # Ensure the model save directory exists
-        os.makedirs(os.path.dirname(self.model_save_path), exist_ok=True)
-
-        self.train()
-
-    def load_data(self, test_size=0.2):
-        """Loads and splits data from text files into training and test sets."""
-        data_files = glob("data/prepared_data/*.txt")[:self.max_files]
-        print(f"Loading data from {len(data_files)} files")
-
-        train_files, test_files = train_test_split(data_files, test_size=test_size, random_state=42)
-
-        train_dataset = ChessDataset(train_files)
-        test_dataset = ChessDataset(test_files)
-
-        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
-
-        return train_loader, test_loader
-
-    def check_input(self):
-        while not self.stop_training:
-            user_input = input()
-            if user_input == "stop":
-                self.stop_training = True
-
-    def train(self):
-        # Load data
-        train_loader, test_loader = self.load_data()
-
-        # Initialize model, loss function, and optimizer
-        train_model = ChessCNN()
-        criterion = nn.MSELoss()  # Mean Squared Error for regression
-        optimizer = optim.AdamW(train_model.parameters(), lr=self.lr)
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
-
-        # Start the input-checking thread
-        input_thread = threading.Thread(target=self.check_input)
-        input_thread.start()
-
-        try:
-            # Training loop
-            for epoch in range(self.num_epochs):
-                if self.stop_training:
-                    print("Training loop stopped by input \"stop\".")
-                    break
-
-                train_model.train()  # Set model to training mode
-                total_loss = 0
-                for inputs, targets in train_loader:
-                    optimizer.zero_grad()  # Clear gradients
-                    outputs = train_model(inputs)  # Forward pass
-                    loss = criterion(outputs, targets.unsqueeze(1))  # Calculate loss
-                    loss.backward()  # Backward pass
-                    optimizer.step()  # Update weights
-
-                    total_loss += loss.item()  # Accumulate loss for reporting
-
-                avg_loss = total_loss / len(train_loader)
-                print(f"Epoch [{epoch + 1}/{self.num_epochs}], Loss: {avg_loss:.4f}")
-                scheduler.step(avg_loss)
-
-            # Save the trained model
-            path = self.model_save_path.split(".")[0] + f"{get_loss(train_model, test_loader, criterion)}." + self.model_extension
-            torch.save(train_model.state_dict(), path)
-            print(f"Model saved to {path}")
-        finally:
-            # Ensure the input-checking thread is stopped
-            self.stop_training = True
-            input_thread.join()  # Wait for the thread to finish
-            print("Training finished and resources cleaned up.")
-
-
-def model_eval(model, board):
-    """
-    Evaluates the board position using the model.
-    """
-    model.eval()
-    with torch.no_grad():
-        position_tensor = board_to_tensor(board).unsqueeze(0)
-        return model(position_tensor)
-
-
-class ChessDataset(Dataset):
-    def __init__(self, data_files):
-        self.positions = []
-        self.evaluations = []
-
-        for file in data_files:
-            with open(file, "r") as f:
-                for line in f:
-                    fen, eval_score = line.strip().split(',')
-                    self.positions.append(fen_to_tensor(fen))
-                    self.evaluations.append(float(eval_score))
-
-        self.evaluations = torch.tensor(self.evaluations, dtype=torch.float32)
-
-    def __len__(self):
-        return len(self.evaluations)
-
-    def __getitem__(self, idx):
-        return self.positions[idx], self.evaluations[idx]
-
-
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
-
-    def forward(self, x):
-        residual = self.shortcut(x)
-        x = torch.relu(self.bn1(self.conv1(x)))
-        x = self.bn2(self.conv2(x))
-        x += residual  # Residual connection
-        return torch.relu(x)
-
-
-class ChessCNN(nn.Module):
-    def __init__(self):
-        super(ChessCNN, self).__init__()
-        self.layer1 = ResidualBlock(13, 32)
-        self.layer2 = ResidualBlock(32, 64)
-        self.layer3 = ResidualBlock(64, 128)
-        self.dropout = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(128 * 8 * 8, 256)
-        self.fc2 = nn.Linear(256, 1)
-
-    def forward(self, x):
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = x.view(x.size(0), -1)
-        x = self.dropout(torch.relu(self.fc1(x)))
-        x = self.fc2(x)
-        return x
-
+            # Huấn luyện trên toàn bộ buffer
+            trainer.train(replay_buffer)
+            print(f"Game {game_num+1}/{num_games} finished. Result: {game_result}")
+        else:
+            print(f"Game {game_num+1}/{num_games} skipped. No data collected.")
+        
+        # Lưu mô hình sau mỗi game (tuỳ chọn)
+        if (game_num + 1) % 10 == 0:
+            trainer.save_model(f"model_{game_num+1}.pt")
+    
+    # Lưu mô hình cuối cùng
+    trainer.save_model("final_model.pt")
 
 if __name__ == "__main__":
-    trainer = Trainer(num_epochs=100, learning_rate=0.001, model_save_path="data/saved_models/chess_model.pth")
+    train()

@@ -3,6 +3,9 @@ import os
 import pygame
 import chess
 import engine as ce
+import threading
+import time
+
 from pygame.locals import *
 
 # Constants
@@ -77,8 +80,8 @@ class ChessGame:
         for row in range(8):
             for col in range(8):
                 # Flip rows and columns for black's perspective
-                draw_row = 7 - row if self.current_turn == chess.BLACK else row
-                draw_col = 7 - col if self.current_turn == chess.BLACK else col
+                draw_row = 7 - row if self.player_color == chess.BLACK else row
+                draw_col = 7 - col if self.player_color == chess.BLACK else col
                 color = colors[(row + col) % 2]
                 pygame.draw.rect(screen, color, pygame.Rect(draw_col * SQ_SIZE, draw_row * SQ_SIZE, SQ_SIZE, SQ_SIZE))
 
@@ -86,8 +89,8 @@ class ChessGame:
         for row in range(8):
             for col in range(8):
                 # Flip rows and columns for black's perspective
-                board_row = 7 - row if self.current_turn == chess.BLACK else row
-                board_col = 7 - col if self.current_turn == chess.BLACK else col
+                board_row = 7 - row if self.player_color == chess.BLACK else row
+                board_col = 7 - col if self.player_color == chess.BLACK else col
                 piece = chess_game.board.piece_at(chess.square(col, 7 - row))
                 if piece:
                     piece_symbol = piece.symbol()
@@ -117,13 +120,34 @@ class ChessGame:
 
         # Engine
         else:
-            self.playEngineMove(self.model, self.max_time, chess.WHITE)
-            self.current_turn = not self.current_turn  # Switch turns
+            if not hasattr(self, "ai_thread") or not self.ai_thread.is_alive():
+                self.ai_thread = threading.Thread(target=self.run_engine_move)
+                self.ai_thread.start()
+
+    def run_engine_move(self):
+        try:
+            print("[AI] Thinking...")
+            best_move = self.playEngineMove(self.model, self.max_time, self.current_turn)
+            print(f"[AI] Best move: {best_move}")
+            
+            # ✅ Delay 1s trước khi push nước đi => đảm bảo vẽ ra sau khi delay
+            time.sleep(1)
+            
+            self.board.push(best_move)
+            self.current_turn = not self.current_turn
+            print("[AI] Move done.")
+        except Exception as e:
+            print(f"[ERROR] AI move failed: {e}")
+
 
     def playEngineMove(self, model, max_time, color):
-        engine = ce.Engine(model, self.board, max_time, color)
-        best_move = engine.get_best_move()
-        self.board.push(best_move)
+        try:
+            engine = ce.Engine(model, self.board, max_time, color)
+            engine.max_depth = 4
+            return engine.get_best_move()  # ✅ Chỉ trả về move
+        except Exception as e:
+            print(f"[ERROR] in playEngineMove: {e}")
+            return None
 
     def handle_mouse_down(self, event):
         row, col = event.pos[1] // SQ_SIZE, event.pos[0] // SQ_SIZE
@@ -140,17 +164,26 @@ class ChessGame:
     def handle_mouse_up(self, event):
         if not self.dragging_piece:
             return
+
         end_row, end_col = event.pos[1] // SQ_SIZE, event.pos[0] // SQ_SIZE
-        # Mirror the square for black's perspective
         if self.player_color == chess.BLACK:
             end_row, end_col = 7 - end_row, 7 - end_col
+
         end_square = chess.square(end_col, 7 - end_row)
-        move = chess.Move(self.selected_square, end_square)
-        if move in self.board.legal_moves:
+
+        move = None
+        for legal_move in self.board.legal_moves:
+            if legal_move.from_square == self.selected_square and legal_move.to_square == end_square:
+                move = legal_move
+                break
+
+        if move:
             self.board.push(move)
-            self.current_turn = not self.current_turn  # Switch turns
+            self.current_turn = not self.current_turn
+
         self.selected_square = None
         self.dragging_piece = None
+
 
     def update_timers(self):
         now = pygame.time.get_ticks()
@@ -192,7 +225,11 @@ class ChessGame:
                 print("Invalid input. Please enter an integer.")
 
     def run(self):
-        self.init()
+        #self.init()
+        self.player_color = chess.WHITE
+        self.model = "data/saved_models/chess_test_model16.365107344799355.pth"
+        self.max_time = 2
+
         clock = pygame.time.Clock()
         while not self.board.is_checkmate():
             self.handle_events()

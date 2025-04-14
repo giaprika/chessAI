@@ -5,11 +5,11 @@ import chess.engine
 import chess.pgn
 
 # Path to Stockfish engine (update this to the correct path on your system)
-STOCKFISH_PATH = "./stockfish/stockfish-macos-m1-apple-silicon"
+STOCKFISH_PATH = "./stockfish/stockfish-windows-x86-64-avx2.exe"
 engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
 # Path to PGN file (update this to the correct PGN file location)
-PGN_PATH = "data/raw_data/ficsgamesdb_202401_standard2000_nomovetimes_401554.pgn"
+PGN_PATH = "data/raw_data/lichess_db_standard_rated_2013-01.pgn"
 
 # Output directory for prepared data
 OUTPUT_DIRECTORY = "data/prepared_data"
